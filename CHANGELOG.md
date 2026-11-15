@@ -1,5 +1,8 @@
 # Unreleased
 
+- Ask users to sign in again only after the Accounts session endpoint confirms
+  rejection. Temporary workspace sync failures keep valid cached access.
+
 - Add Smart routing and Global proxy modes for standard System VPN profiles on macOS,
   iOS, Android, Windows, and Linux. Smart routing directs LAN and Chinese mainland
   domain traffic directly while routing other public traffic through the node;

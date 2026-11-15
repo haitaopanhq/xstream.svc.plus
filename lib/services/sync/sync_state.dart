@@ -92,6 +92,16 @@ class SyncStateStore {
     summary.value = summary.value.copyWith(nodeCount: 0, nodeIds: "");
   }
 
+  void recordTransientError(String message) {
+    summary.value = summary.value.copyWith(lastError: message);
+  }
+
+  void clearTransientError(String message) {
+    if (summary.value.lastError == message) {
+      summary.value = summary.value.copyWith();
+    }
+  }
+
   Future<void> recordError(String message) async {
     final prefs = await SharedPreferences.getInstance();
     await prefs.setString(_lastErrorKey, message);

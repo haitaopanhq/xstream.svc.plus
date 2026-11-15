@@ -20,6 +20,7 @@ class _LoginScreenState extends State<LoginScreen> {
   final _usageService = AccountUsageService();
   Future<(AccountUsageSummary, int)>? _usage;
   Timer? _usageTimer;
+  bool _reauthenticating = false;
 
   final SessionManager _sessionManager = SessionManager.instance;
   final DesktopSyncService _syncService = DesktopSyncService.instance;
@@ -134,6 +135,7 @@ class _LoginScreenState extends State<LoginScreen> {
       final result =
           await _sessionManager.verifyMfaCode(_mfaCodeController.text);
       if (mounted) {
+        _finishReauthentication(result);
         ScaffoldMessenger.of(context)
             .showSnackBar(SnackBar(content: Text(result.message)));
       }
@@ -144,10 +146,25 @@ class _LoginScreenState extends State<LoginScreen> {
         password: _passwordController.text,
       );
       if (mounted) {
+        _finishReauthentication(result);
         ScaffoldMessenger.of(context)
             .showSnackBar(SnackBar(content: Text(result.message)));
       }
     }
+  }
+
+  void _finishReauthentication(LoginResult result) {
+    if (!result.success) return;
+    _passwordController.clear();
+    _mfaCodeController.clear();
+    if (_reauthenticating) setState(() => _reauthenticating = false);
+  }
+
+  void _reauthenticate() {
+    _baseUrlController.text = _sessionManager.baseUrl.value;
+    _usernameController.text = _sessionManager.currentUser.value ?? '';
+    _passwordController.clear();
+    setState(() => _reauthenticating = true);
   }
 
   Future<void> _handleLogout() async {
@@ -161,7 +178,10 @@ class _LoginScreenState extends State<LoginScreen> {
 
   Future<void> _handleSyncNow() async {
     final result = await _syncService.syncNow(manual: true);
-    if (!mounted) return;
+    if (!mounted ||
+        result.message == DesktopSyncService.sessionExpiredMessage) {
+      return;
+    }
     ScaffoldMessenger.of(context).showSnackBar(
       SnackBar(content: Text(context.l10n.get(result.message))),
     );
@@ -183,7 +203,7 @@ class _LoginScreenState extends State<LoginScreen> {
         final isLoggedIn = status == SessionStatus.loggedIn;
         final isMfaRequired = status == SessionStatus.mfaRequired;
 
-        if (isLoggedIn) {
+        if (isLoggedIn && !_reauthenticating) {
           return _buildLoggedInView(context);
         }
         return _buildLoginForm(context, isMfaRequired);
@@ -340,6 +360,12 @@ class _LoginScreenState extends State<LoginScreen> {
                     context,
                   ).textTheme.labelMedium?.copyWith(color: cs.error),
                 ),
+                if (summary.lastError ==
+                    DesktopSyncService.sessionExpiredMessage)
+                  TextButton(
+                    onPressed: _reauthenticate,
+                    child: Text(context.l10n.get('connectorSignInAgain')),
+                  ),
               ],
             ],
           ),
@@ -511,6 +537,20 @@ class _LoginScreenState extends State<LoginScreen> {
                           );
                         },
                       ),
+
+                      if (_reauthenticating && _sessionManager.isLoggedIn)
+                        ValueListenableBuilder<bool>(
+                          valueListenable: _sessionManager.loading,
+                          builder: (context, loading, _) => TextButton(
+                            onPressed: loading
+                                ? null
+                                : () {
+                                    _passwordController.clear();
+                                    setState(() => _reauthenticating = false);
+                                  },
+                            child: Text(context.l10n.get('cancel')),
+                          ),
+                        ),
 
                       // Error message
                       ValueListenableBuilder<String?>(

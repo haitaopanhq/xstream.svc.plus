@@ -1,5 +1,6 @@
 import 'dart:async';
 import 'dart:convert';
+import 'dart:io';
 
 import 'package:flutter/foundation.dart';
 import 'package:http/http.dart' as http;
@@ -48,6 +49,9 @@ class SyncedNodeMetadata {
 class DesktopSyncService {
   DesktopSyncService._();
   static final instance = DesktopSyncService._();
+
+  static const sessionExpiredMessage = 'connectorSessionExpired';
+  static const syncUnavailableMessage = 'connectorSyncTemporarilyUnavailable';
 
   static const _nodesPath = '/api/agent-server/v1/nodes';
   static const _autoInterval = Duration(minutes: 10);
@@ -116,8 +120,8 @@ class DesktopSyncService {
         );
       }
       if (accessResponse.statusCode == 401) {
-        return await _handleUnauthorized(
-            session, generation, '/api/auth/network-access');
+        return await _handleUnauthorized(session, generation, headers,
+            '/api/auth/network-access', purgeOwner);
       }
       final accessStop = _explicitStopReason(accessResponse);
       if (accessStop != null) {
@@ -183,7 +187,8 @@ class DesktopSyncService {
         );
       }
       if (response.statusCode == 401) {
-        return await _handleUnauthorized(session, generation, _nodesPath);
+        return await _handleUnauthorized(
+            session, generation, headers, _nodesPath, purgeOwner);
       }
       final nodeStop = _explicitStopReason(response);
       if (nodeStop != null) {
@@ -309,6 +314,14 @@ class DesktopSyncService {
         success: true,
         message: '同步成功 (${nodes.length} 个区域)',
       );
+    } on TimeoutException {
+      return _syncUnavailable(generation);
+    } on SocketException {
+      return _syncUnavailable(generation);
+    } on http.ClientException {
+      return _syncUnavailable(generation);
+    } on SessionRefreshUnavailableException {
+      return _syncUnavailable(generation);
     } catch (error) {
       final message = '同步失败: $error';
       await SyncStateStore.instance.recordError(message);
@@ -323,24 +336,82 @@ class DesktopSyncService {
     }
   }
 
-  // Background authentication failures must never perform a user logout.
-  // Keep saved credentials/profiles, but withdraw managed authorization.
+  // A protected sync endpoint can reject an otherwise valid account session.
   Future<DesktopSyncResult> _handleUnauthorized(
     SessionManager session,
     int generation,
+    Map<String, String> headers,
     String endpoint,
+    String? purgeOwner,
   ) async {
+    addAppLog('连接器同步认证失败: HTTP 401 $endpoint', level: LogLevel.warning);
+    http.Response? verification;
+    try {
+      verification = await session.getWithSessionRecovery(
+        client,
+        session.buildEndpoint('/api/auth/session'),
+        headers,
+      );
+    } on TimeoutException {
+      addAppLog('连接器会话验证超时', level: LogLevel.warning);
+    } on Exception {
+      addAppLog('连接器会话暂时无法验证', level: LogLevel.warning);
+    }
     if (generation != session.generation) {
       return const DesktopSyncResult(
-        success: false,
-        message: 'Session changed',
-      );
+          success: false, message: 'Session changed');
     }
-    const message = 'connectorAuthenticationRequired';
-    addAppLog('连接器同步认证失败: HTTP 401 $endpoint', level: LogLevel.warning);
-    await SyncStateStore.instance.recordError(message);
-    await clearManagedConnections();
-    return const DesktopSyncResult(success: false, message: message);
+
+    if (verification != null) {
+      final stop = _explicitStopReason(verification);
+      if (stop != null) {
+        return _stopManagedAccess(stop, purgeOwner, generation);
+      }
+      if (_isRejectedSession(verification)) {
+        await clearManagedConnections();
+        if (generation != session.generation) {
+          return const DesktopSyncResult(
+            success: false,
+            message: 'Session changed',
+          );
+        }
+        SyncStateStore.instance.recordTransientError(sessionExpiredMessage);
+        return const DesktopSyncResult(
+          success: false,
+          message: sessionExpiredMessage,
+        );
+      }
+    }
+    return _syncUnavailable(generation);
+  }
+
+  DesktopSyncResult _syncUnavailable(int generation) {
+    if (generation != SessionManager.instance.generation) {
+      return const DesktopSyncResult(
+          success: false, message: 'Session changed');
+    }
+    SyncStateStore.instance.recordTransientError(syncUnavailableMessage);
+    return const DesktopSyncResult(
+      success: false,
+      message: syncUnavailableMessage,
+    );
+  }
+
+  static bool _isRejectedSession(http.Response response) {
+    if (response.statusCode != 401) return false;
+    try {
+      final body = jsonDecode(response.body);
+      if (body is! Map) return false;
+      const rejected = {
+        'invalid_session',
+        'session not found',
+        'invalid or expired token',
+      };
+      return rejected.contains(body['code']) ||
+          rejected.contains(body['error']);
+    } on FormatException {
+      return false;
+    }
   }
 
   // Quota status is advisory. Older servers and transient failures must not
@@ -502,6 +573,8 @@ class DesktopSyncService {
 
   void _onSessionChanged() {
     _timer?.cancel();
+    SyncStateStore.instance.clearTransientError(sessionExpiredMessage);
+    SyncStateStore.instance.clearTransientError(syncUnavailableMessage);
     if (!SessionManager.instance.isLoggedIn) {
       unawaited(QuotaNotifications.instance.selectAccount(null));
       return;

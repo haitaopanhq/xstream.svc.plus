@@ -38,6 +38,11 @@ class AppLocalizations {
       'connectors': 'Connectors',
       'connectorAuthenticationRequired':
           'Connector authentication failed. Saved login and connections are retained. Retry synchronization.',
+      'connectorSessionExpired':
+          'The account session has expired or was revoked. Sign in again to resume sync.',
+      'connectorSignInAgain': 'Sign in again',
+      'connectorSyncTemporarilyUnavailable':
+          'Workspace sync is temporarily unavailable. Try syncing again later.',
       'connectorIntro':
           'Workspace sync is optional. XConnect is a client tool that helps you manage and establish secure connections to your own or authorized services.',
       'selfHostedConnector': 'Self-Hosted Connector',
@@ -503,6 +508,9 @@ curl -I --proxy socks5h://127.0.0.1:1080 --max-time 15 https://grok.com''',
       'proxy': '连接',
       'connectors': '连接器',
       'connectorAuthenticationRequired': '连接器认证失败，已保留登录和连接缓存。请重试同步。',
+      'connectorSessionExpired': '账号会话已失效，请重新登录以恢复同步。',
+      'connectorSignInAgain': '重新登录',
+      'connectorSyncTemporarilyUnavailable': '工作区暂时无法同步，请稍后重试。',
       'connectorIntro': '工作区同步为可选功能。本应用为客户端工具，帮助用户管理并建立与自有或授权服务之间的安全连接。',
       'selfHostedConnector': '自托管连接器',
       'teamDedicated': '团队专属连接',
