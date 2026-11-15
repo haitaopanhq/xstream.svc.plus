@@ -20,6 +20,10 @@ class LoginResult {
   });
 }
 
+class SessionRefreshUnavailableException implements Exception {
+  const SessionRefreshUnavailableException();
+}
+
 /// Handles xc_session cookie and bearer token persistence.
 class SessionManager {
   SessionManager._();
@@ -151,8 +155,12 @@ class SessionManager {
           headers['Authorization'] = 'Bearer $token';
           return get(headers);
         }
-      } else if (refreshed.statusCode >= 500) {
-        return refreshed;
+      } else if (refreshed.statusCode == 408 ||
+          refreshed.statusCode == 429 ||
+          refreshed.statusCode >= 500) {
+        // A refresh endpoint failure is neither a rejected session nor an
+        // authoritative network policy response from the requested endpoint.
+        throw const SessionRefreshUnavailableException();
       }
     }
     // One bounded retry also permits recovery from a transient rejected read.

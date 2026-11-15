@@ -10,6 +10,7 @@ import 'package:shared_preferences/shared_preferences.dart';
 import 'package:xconnect/services/session/network_access_policy.dart';
 import 'package:xconnect/services/session/session_manager.dart';
 import 'package:xconnect/services/sync/desktop_sync_service.dart';
+import 'package:xconnect/services/sync/sync_state.dart';
 import 'package:xconnect/services/vpn_config_service.dart';
 import 'package:xconnect/utils/app_log_file.dart';
 import 'package:xconnect/utils/global_config.dart';
@@ -97,17 +98,62 @@ void main() {
   });
   tearDown(sync.dispose);
 
-  test(
-    'same-account restart restores cached nodes despite network timeout',
-    () async {
-      await session.init();
-      await VpnConfig.load();
-      sync.client = MockClient((_) async => throw TimeoutException('offline'));
-      expect((await sync.syncNow()).success, isFalse);
-      expect(policy.active, isTrue);
-      expect(VpnConfig.nodes.single.managedNodeId, 'node-a');
-    },
-  );
+  test('weak network, offline restart and retry preserve the same snapshot',
+      () async {
+    final saved = VpnConfig.allNodes.single;
+    final summary = SyncStateStore.instance.summary.value;
+    var offline = false;
+    var recovered = false;
+    sync.client = MockClient((request) async {
+      if (offline) throw const SocketException('No network');
+      if (!recovered) {
+        // Network access looks rejected while the independent session check
+        // times out. This is not enough evidence to invalidate the account.
+        if (request.url.path == '/api/auth/session') {
+          throw TimeoutException('Weak network');
+        }
+        return http.Response('{"error":"invalid_session"}', 401);
+      }
+      if (request.url.path.endsWith('/network-access')) {
+        return http.Response(jsonEncode(access), 200);
+      }
+      if (request.url.path.endsWith('/nodes')) {
+        return http.Response(
+          jsonEncode([
+            {...nodes.single, 'id': 'node-after-reconnect'}
+          ]),
+          200,
+        );
+      }
+      return http.Response('', 404);
+    });
+
+    final weak = await sync.syncNow();
+    expect(weak.message, DesktopSyncService.syncUnavailableMessage);
+    expect(policy.active, isTrue);
+    expect(VpnConfig.nodes.single.configPath, saved.configPath);
+    expect(SyncStateStore.instance.summary.value.lastSuccessAt,
+        summary.lastSuccessAt);
+
+    offline = true;
+    await session.init();
+    await VpnConfig.load();
+    final disconnected = await sync.syncNow(manual: true);
+    expect(disconnected.message, DesktopSyncService.syncUnavailableMessage);
+    expect(session.isLoggedIn, isTrue);
+    expect(session.sessionToken, 'test-session');
+    expect(policy.active, isTrue);
+    expect(VpnConfig.nodes.single.managedNodeId, 'node-a');
+    expect(await File(saved.configPath).exists(), isTrue);
+    expect(sync.syncing.value, isFalse);
+
+    offline = false;
+    recovered = true;
+    expect((await sync.syncNow(manual: true)).success, isTrue);
+    expect(SyncStateStore.instance.summary.value.lastError, isNull);
+    expect(VpnConfig.nodes.single.managedNodeId, 'node-after-reconnect');
+    expect(session.sessionToken, 'test-session');
+  });
 
   test('temporary team-node 503 keeps the last successful snapshot', () async {
     sync.client = MockClient(
@@ -205,8 +251,13 @@ void main() {
   test('expired login retains credentials and saved managed files', () async {
     final saved = VpnConfig.allNodes.single;
     session.onSessionReset = sync.clearManagedConnections;
-    sync.client = MockClient((_) async => http.Response('', 401));
-    expect((await sync.syncNow()).success, isFalse);
+    sync.client = MockClient(
+      (_) async => http.Response('{"error":"invalid or expired token"}', 401),
+    );
+    final result = await sync.syncNow();
+    expect(result.message, DesktopSyncService.sessionExpiredMessage);
+    final prefs = await SharedPreferences.getInstance();
+    expect(prefs.getString('sync.lastError'), isNull);
     expect(session.isLoggedIn, isTrue);
     expect(session.sessionToken, 'test-session');
     expect(VpnConfig.nodes, isEmpty);
@@ -221,7 +272,7 @@ void main() {
             request.url.path.endsWith('/network-access')) {
           return http.Response(jsonEncode(access), 200);
         }
-        return http.Response('', 401);
+        return http.Response('{"error":"session not found"}', 401);
       });
       expect((await sync.syncNow()).success, isFalse);
       expect(session.isLoggedIn, isTrue);
@@ -236,12 +287,66 @@ void main() {
     });
   }
 
-  test('successful retry restores access without asking for login', () async {
-    sync.client = MockClient((request) async => http.Response(
-        '{}', request.url.path == '/api/auth/session' ? 200 : 401));
-    await sync.syncNow();
-    expect(policy.active, isFalse);
+  for (final verification in [
+    http.Response('{"user":{"id":"account-a"}}', 200),
+    http.Response('Unauthorized', 401),
+    http.Response('', 503),
+  ]) {
+    test(
+        'sync 401 with session response ${verification.statusCode} keeps access',
+        () async {
+      final saved = VpnConfig.allNodes.single;
+      var verified = false;
+      sync.client = MockClient((request) async {
+        if (request.url.path == '/api/auth/session') {
+          verified = true;
+          expect(request.headers['Authorization'], 'Bearer test-session');
+          return verification;
+        }
+        return http.Response('{"error":"invalid_session"}', 401);
+      });
+
+      final result = await sync.syncNow(manual: true);
+      expect(verified, isTrue);
+      expect(result.success, isFalse);
+      expect(result.message, DesktopSyncService.syncUnavailableMessage);
+      expect(SyncStateStore.instance.summary.value.lastError, result.message);
+      expect(session.isLoggedIn, isTrue);
+      expect(policy.active, isTrue);
+      expect(VpnConfig.nodes.single.configPath, saved.configPath);
+      expect(await File(saved.configPath).exists(), isTrue);
+
+      sync.client = MockClient((request) async {
+        if (request.url.path.endsWith('/network-access')) {
+          return http.Response(jsonEncode(access), 200);
+        }
+        if (request.url.path.endsWith('/nodes')) {
+          return http.Response(jsonEncode(nodes), 200);
+        }
+        return http.Response('', 404);
+      });
+      expect((await sync.syncNow()).success, isTrue);
+      expect(SyncStateStore.instance.summary.value.lastError, isNull);
+    });
+  }
+
+  test('rate-limited session refresh cannot purge cached nodes', () async {
+    final prefs = await SharedPreferences.getInstance();
+    await prefs.setString('session.refreshToken', 'test-refresh');
+    await session.init();
+    final saved = VpnConfig.allNodes.single;
+    var refreshes = 0;
+    bool canRefresh = false;
     sync.client = MockClient((request) async {
+      if (request.url.path.endsWith('/token/refresh')) {
+        refreshes++;
+        return canRefresh
+            ? http.Response('{"access_token":"renewed"}', 200)
+            : http.Response('{"code":"quota_exhausted"}', 429);
+      }
+      if (request.headers['Authorization'] != 'Bearer renewed') {
+        return http.Response('{"error":"invalid_session"}', 401);
+      }
       if (request.url.path.endsWith('/network-access')) {
         return http.Response(jsonEncode(access), 200);
       }
@@ -250,18 +355,30 @@ void main() {
       }
       return http.Response('', 404);
     });
-    expect((await sync.syncNow()).success, isTrue);
-    expect(session.isLoggedIn, isTrue);
+    final result = await sync.syncNow();
+    expect(result.message, DesktopSyncService.syncUnavailableMessage);
+    expect(refreshes, 1);
     expect(policy.active, isTrue);
-    expect(VpnConfig.nodes.single.managedNodeId, 'node-a');
+    expect(VpnConfig.nodes.single.configPath, saved.configPath);
+    expect(await File(saved.configPath).exists(), isTrue);
+    expect(session.sessionToken, 'test-session');
+
+    canRefresh = true;
+    expect((await sync.syncNow()).success, isTrue);
+    expect(refreshes, 2);
+    expect(session.sessionToken, 'renewed');
+    expect(SyncStateStore.instance.summary.value.lastError, isNull);
   });
 
-  test('old request cannot invalidate a new login', () async {
+  test('old session verification cannot invalidate a new login', () async {
     final started = Completer<void>();
     final response = Completer<http.Response>();
     sync.client = MockClient((request) async {
-      started.complete();
-      return response.future;
+      if (request.url.path == '/api/auth/session') {
+        if (!started.isCompleted) started.complete();
+        return response.future;
+      }
+      return http.Response('', 401);
     });
     final pending = sync.syncNow();
     await started.future;
@@ -270,7 +387,7 @@ void main() {
     await prefs.setString('session.token', 'new-session');
     await session.init();
     sync.client = MockClient((_) async => http.Response('', 503));
-    response.complete(http.Response('', 401));
+    response.complete(http.Response('{"code":"invalid_session"}', 401));
     expect((await pending).success, isFalse);
     expect(session.isLoggedIn, isTrue);
     expect(session.sessionToken, 'new-session');
