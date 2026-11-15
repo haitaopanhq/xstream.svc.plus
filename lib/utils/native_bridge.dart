@@ -642,12 +642,20 @@ class NativeBridge {
         await _stopOtherRunningNodes(nodeName);
         if (_mobileActiveNodeName != null &&
             _mobileActiveNodeName != nodeName) {
-          stopXray();
+          try {
+            stopXray();
+          } catch (_) {}
           _mobileActiveNodeName = null;
         }
 
         final configJson = await File(runtimeConfigPath).readAsString();
-        final result = startXray(configJson);
+        var result = startXray(configJson);
+        if (result.contains('already running')) {
+          try {
+            stopXray();
+          } catch (_) {}
+          result = startXray(configJson);
+        }
         if (result.toLowerCase().startsWith('success')) {
           _mobileActiveNodeName = nodeName;
         }
@@ -702,16 +710,16 @@ class NativeBridge {
     if (node == null) return '未知节点: $nodeName';
 
     if (_isMobile || Platform.isMacOS) {
-      if (_mobileActiveNodeName != nodeName) {
-        return 'success';
-      }
       try {
         final result = stopXray();
-        if (result.toLowerCase().startsWith('success')) {
-          _mobileActiveNodeName = null;
+        _mobileActiveNodeName = null;
+        if (result.toLowerCase().startsWith('success') ||
+            result.contains('not running')) {
+          return 'success';
         }
         return result;
       } catch (e) {
+        _mobileActiveNodeName = null;
         return '停止失败: $e';
       }
     }

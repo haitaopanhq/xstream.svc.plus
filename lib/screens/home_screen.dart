@@ -623,7 +623,9 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
       // Determine if start succeeded
       final startOk = useTunMode
           ? NativeBridge.isTunnelStartAcceptedMessage(msg)
-          : await NativeBridge.checkNodeStatus(nodeName);
+          : (msg.toLowerCase().startsWith('success') ||
+              msg.contains('服务已在运行') ||
+              await NativeBridge.checkNodeStatus(nodeName));
       if (!mounted) return;
       if (!startOk) {
         setState(() {

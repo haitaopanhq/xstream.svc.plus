@@ -151,7 +151,10 @@ func StartNodeService(name *C.char) *C.char {
 		return C.CString("success")
 	}
 	if xray.GetXrayState() {
-		return C.CString("error:already running")
+		if err := stopXrayInternal(); err != nil {
+			return C.CString("error:already running: " + err.Error())
+		}
+		clearNodeRegistry()
 	}
 
 	configPath := filepath.Join(os.TempDir(), node+".json")
@@ -172,15 +175,7 @@ func StopNodeService(name *C.char) *C.char {
 	defer instMu.Unlock()
 
 	node := C.GoString(name)
-	if _, ok := procMap.Load(node); ok {
-		if xray.GetXrayState() {
-			if err := stopXrayInternal(); err != nil {
-				return C.CString("error:" + err.Error())
-			}
-		}
-		procMap.Delete(node)
-		return C.CString("success")
-	}
+	procMap.Delete(node)
 	if xray.GetXrayState() {
 		if err := stopXrayInternal(); err != nil {
 			return C.CString("error:" + err.Error())
@@ -205,7 +200,10 @@ func StartXray(configC *C.char) *C.char {
 	defer instMu.Unlock()
 
 	if xray.GetXrayState() {
-		return C.CString("error:already running")
+		if err := stopXrayInternal(); err != nil {
+			return C.CString("error:already running: " + err.Error())
+		}
+		clearNodeRegistry()
 	}
 	cfgData := []byte(C.GoString(configC))
 	if err := startXrayInternal(cfgData); err != nil {
@@ -220,7 +218,8 @@ func StopXray() *C.char {
 	defer instMu.Unlock()
 
 	if !xray.GetXrayState() {
-		return C.CString("error:not running")
+		clearNodeRegistry()
+		return C.CString("success")
 	}
 	if err := stopXrayInternal(); err != nil {
 		return C.CString("error:" + err.Error())
