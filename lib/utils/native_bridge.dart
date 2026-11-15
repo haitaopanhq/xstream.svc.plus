@@ -182,7 +182,7 @@ class NativeBridge {
           Platform.environment['XDG_SESSION_TYPE'],
         )) {
       try {
-        _ffi.initTray();
+        _ffi.initTray?.call();
       } catch (_) {}
     }
   }
@@ -250,6 +250,41 @@ class NativeBridge {
     return _bindings!;
   }
 
+  @visibleForTesting
+  static List<String> getMacOSLibraryCandidates({String? executablePath}) {
+    final execPath = executablePath ?? Platform.resolvedExecutable;
+    final execDir = File(execPath).parent.path;
+    final contentsDir = Directory(execDir).parent.path;
+    final bundleDir = Directory(contentsDir).parent.path;
+
+    return <String>[
+      'libxray_bridge.dylib',
+      '$contentsDir/Frameworks/libxray_bridge.dylib',
+      '$contentsDir/PlugIns/PacketTunnel.appex/Contents/Frameworks/libxray_bridge.dylib',
+      '$bundleDir/PacketTunnel.appex/Contents/Frameworks/libxray_bridge.dylib',
+      '$execDir/PacketTunnel.appex/Contents/Frameworks/libxray_bridge.dylib',
+      '/Applications/xconnect.app/Contents/Frameworks/libxray_bridge.dylib',
+      '/Applications/xconnect.app/Contents/PlugIns/PacketTunnel.appex/Contents/Frameworks/libxray_bridge.dylib',
+    ];
+  }
+
+  static ffi.DynamicLibrary _openMacOSLib() {
+    try {
+      return ffi.DynamicLibrary.open('libxray_bridge.dylib');
+    } catch (_) {}
+
+    for (final candidate in getMacOSLibraryCandidates()) {
+      if (candidate == 'libxray_bridge.dylib') continue;
+      if (File(candidate).existsSync()) {
+        try {
+          return ffi.DynamicLibrary.open(candidate);
+        } catch (_) {}
+      }
+    }
+
+    return ffi.DynamicLibrary.open('libxray_bridge.dylib');
+  }
+
   static ffi.DynamicLibrary _openLib() {
     if (Platform.isWindows) {
       return ffi.DynamicLibrary.open('libgo_native_bridge.dll');
@@ -258,7 +293,7 @@ class NativeBridge {
     } else if (Platform.isAndroid) {
       return ffi.DynamicLibrary.open('libgo_native_bridge.so');
     } else if (Platform.isMacOS) {
-      return ffi.DynamicLibrary.open('libxray_bridge.dylib');
+      return _openMacOSLib();
     } else if (Platform.isIOS) {
       return ffi.DynamicLibrary.process();
     }

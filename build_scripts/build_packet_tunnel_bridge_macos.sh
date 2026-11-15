@@ -129,4 +129,19 @@ if [[ -n "${SIGN_IDENTITY}" && "${SIGN_IDENTITY}" != "-" ]]; then
   /usr/bin/codesign --force --sign "${SIGN_IDENTITY}" --timestamp=none "${OUTPUT_LIB}"
 fi
 
+if [[ -n "${BUILT_PRODUCTS_DIR:-}" ]]; then
+  for app_name in xconnect.app XConnect.app; do
+    target_app="${BUILT_PRODUCTS_DIR}/${app_name}"
+    if [[ -d "${target_app}" ]]; then
+      app_frameworks="${target_app}/Contents/Frameworks"
+      mkdir -p "${app_frameworks}"
+      cp -f "${OUTPUT_LIB}" "${app_frameworks}/libxray_bridge.dylib"
+      chmod 755 "${app_frameworks}/libxray_bridge.dylib"
+      if [[ -n "${SIGN_IDENTITY}" && "${SIGN_IDENTITY}" != "-" ]]; then
+        /usr/bin/codesign --force --sign "${SIGN_IDENTITY}" --timestamp=none "${app_frameworks}/libxray_bridge.dylib"
+      fi
+    fi
+  done
+fi
+
 echo "[xray-bridge] built: ${OUTPUT_LIB}"

@@ -190,6 +190,15 @@ run_macos_build() {
     return 1
   fi
 
+  local extension_bridge="${macos_app_bundle}/Contents/PlugIns/PacketTunnel.appex/Contents/Frameworks/libxray_bridge.dylib"
+  local app_frameworks="${macos_app_bundle}/Contents/Frameworks"
+  if [[ -f "$extension_bridge" ]]; then
+    echo "Syncing libxray_bridge.dylib to app Frameworks..."
+    mkdir -p "$app_frameworks"
+    cp -f "$extension_bridge" "${app_frameworks}/libxray_bridge.dylib"
+    chmod 755 "${app_frameworks}/libxray_bridge.dylib"
+  fi
+
 
 
   ./scripts/install-runtime-mcp.sh "$macos_app_bundle" "$runtime_arch"
