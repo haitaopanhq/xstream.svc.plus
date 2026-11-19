@@ -48,6 +48,118 @@ bool shouldStopInsteadOfStart({
   return hasLiveTunnel || tunnelPending;
 }
 
+/// Returns true when [node] routes through `Pro-EC2-Pool` or has
+/// `pricingGroup == 'pro'`, where video/streaming traffic is restricted.
+bool isProTierNode(VpnNode? node) {
+  if (node == null) return false;
+  final pool = (node.routingPool ?? '').trim().toLowerCase();
+  final pricing = (node.pricingGroup ?? '').trim().toLowerCase();
+  return pool == 'pro-ec2-pool' || pricing == 'pro';
+}
+
+/// Friendly notice shown when a Pro-tier node is active/selected so users
+/// know streaming/video traffic should use a Media-Pool (Plus/Shared) node.
+class ProStreamingNoticeBanner extends StatelessWidget {
+  final VpnNode? node;
+  final VoidCallback? onSwitchNode;
+  final VoidCallback? onDismiss;
+
+  const ProStreamingNoticeBanner({
+    super.key,
+    required this.node,
+    this.onSwitchNode,
+    this.onDismiss,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    if (!isProTierNode(node)) {
+      return const SizedBox.shrink();
+    }
+    final xc = context.xColors;
+    final cs = Theme.of(context).colorScheme;
+    return Semantics(
+      liveRegion: true,
+      child: Container(
+        key: const ValueKey('pro_streaming_notice_banner'),
+        width: double.infinity,
+        padding: const EdgeInsets.fromLTRB(14, 12, 10, 12),
+        decoration: BoxDecoration(
+          color: xc.warning.withValues(alpha: 0.12),
+          borderRadius: BorderRadius.circular(AppRadius.card),
+          border: Border.all(color: xc.warning.withValues(alpha: 0.35)),
+        ),
+        child: Row(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Padding(
+              padding: const EdgeInsets.only(top: 2),
+              child: Icon(
+                Icons.info_outline_rounded,
+                size: 20,
+                color: xc.warning,
+              ),
+            ),
+            const SizedBox(width: 10),
+            Expanded(
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  Text(
+                    context.l10n.get('proStreamingNoticeTitle'),
+                    style: Theme.of(context).textTheme.titleSmall?.copyWith(
+                          fontWeight: FontWeight.w600,
+                          color: cs.onSurface,
+                        ),
+                  ),
+                  const SizedBox(height: 3),
+                  Text(
+                    context.l10n.get('proStreamingNoticeBody'),
+                    style: Theme.of(context).textTheme.bodySmall?.copyWith(
+                          color: xc.mutedText,
+                        ),
+                  ),
+                  if (onSwitchNode != null) ...[
+                    const SizedBox(height: 6),
+                    TextButton.icon(
+                      onPressed: onSwitchNode,
+                      style: TextButton.styleFrom(
+                        padding: const EdgeInsets.symmetric(
+                          horizontal: 10,
+                          vertical: 4,
+                        ),
+                        minimumSize: Size.zero,
+                        tapTargetSize: MaterialTapTargetSize.shrinkWrap,
+                      ),
+                      icon: const Icon(Icons.swap_horiz_rounded, size: 16),
+                      label: Text(context.l10n.get('proStreamingNoticeSwitch')),
+                    ),
+                  ],
+                ],
+              ),
+            ),
+            if (onDismiss != null)
+              IconButton(
+                onPressed: onDismiss,
+                icon: Icon(
+                  Icons.close_rounded,
+                  size: 18,
+                  color: xc.mutedText,
+                ),
+                padding: EdgeInsets.zero,
+                constraints: const BoxConstraints(
+                  minWidth: 28,
+                  minHeight: 28,
+                ),
+                tooltip: MaterialLocalizations.of(context).closeButtonTooltip,
+              ),
+          ],
+        ),
+      ),
+    );
+  }
+}
+
 class HomeScreen extends StatefulWidget {
   const HomeScreen({super.key});
 
@@ -80,6 +192,7 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
   bool _showNodeOptions = false;
   bool _isSwitchingNode = false;
   bool _latencyProbeInFlight = false;
+  String? _dismissedProNoticeNode;
   List<VpnNode> vpnNodes = [];
   final Map<String, int> _latencyByNode = {};
   DateTime? _connectedAt;
@@ -1416,6 +1529,10 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
   @override
   Widget build(BuildContext context) {
     final xc = context.xColors;
+    final displayNode = _resolveActionNode();
+    final showProNotice =
+        isProTierNode(displayNode) &&
+        _dismissedProNoticeNode != displayNode?.name;
     return LayoutBuilder(
       builder: (context, constraints) {
         return Stack(
@@ -1428,6 +1545,18 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
                   child: Column(
                     crossAxisAlignment: CrossAxisAlignment.start,
                     children: [
+                      if (showProNotice) ...[
+                        ProStreamingNoticeBanner(
+                          node: displayNode,
+                          onSwitchNode: vpnNodes.length > 1
+                              ? () => setState(() => _showNodeOptions = true)
+                              : null,
+                          onDismiss: () => setState(
+                            () => _dismissedProNoticeNode = displayNode?.name,
+                          ),
+                        ),
+                        const SizedBox(height: 12),
+                      ],
                       _buildMonitoringDashboard(context),
                       const SizedBox(height: 16),
                       _buildNodeSummarySection(context),
