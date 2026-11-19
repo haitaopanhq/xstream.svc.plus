@@ -8,6 +8,16 @@ import '../../services/vpn_config_service.dart';
 import '../../utils/global_config.dart';
 import '../../utils/tun_config_guard.dart';
 
+class XrayConfigWriteResult {
+  final String path;
+  final bool modified;
+
+  const XrayConfigWriteResult({
+    required this.path,
+    required this.modified,
+  });
+}
+
 class XrayConfigWriter {
   static const _defaultNodeName = 'Desktop Sync';
   static const _defaultServiceName = 'xconnect.desktop.sync';
@@ -33,6 +43,25 @@ class XrayConfigWriter {
     String? owner,
     String? teamId,
   }) async {
+    final result = await writeConfigForNodeWithResult(
+      json: json,
+      nodeName: nodeName,
+      countryCode: countryCode,
+      nodeId: nodeId,
+      owner: owner,
+      teamId: teamId,
+    );
+    return result.path;
+  }
+
+  static Future<XrayConfigWriteResult> writeConfigForNodeWithResult({
+    required String json,
+    required String nodeName,
+    String? countryCode,
+    String? nodeId,
+    String? owner,
+    String? teamId,
+  }) async {
     final code = await _nodeCode(
       (countryCode ?? '').trim().isNotEmpty ? countryCode! : nodeName,
       nodeId: owner == null ? nodeId : '$owner|$teamId|$nodeId',
@@ -42,8 +71,32 @@ class XrayConfigWriter {
     final file = File(path);
     await file.create(recursive: true);
     final guarded = guardTunInterfaceFieldsForWrite(json);
-    await file.writeAsString(guarded.json);
-    return path;
+    final newBytes = utf8.encode(guarded.json);
+    final newDigest = (await Sha256().hash(newBytes)).bytes;
+    var modified = true;
+    if (await file.exists()) {
+      try {
+        final existingBytes = await file.readAsBytes();
+        final existingDigest = (await Sha256().hash(existingBytes)).bytes;
+        if (_bytesEqual(existingDigest, newDigest)) {
+          modified = false;
+        }
+      } catch (_) {
+        modified = true;
+      }
+    }
+    if (modified) {
+      await file.writeAsString(guarded.json);
+    }
+    return XrayConfigWriteResult(path: path, modified: modified);
+  }
+
+  static bool _bytesEqual(List<int> a, List<int> b) {
+    if (a.length != b.length) return false;
+    for (var i = 0; i < a.length; i++) {
+      if (a[i] != b[i]) return false;
+    }
+    return true;
   }
 
   static Future<String> registerNode({
@@ -56,10 +109,13 @@ class XrayConfigWriter {
     String? nodeId,
     String? owner,
     String? teamId,
+    String? routingPool,
+    String? pricingGroup,
   }) async {
     final normalizedName = (nodeName ?? '').trim().isNotEmpty
         ? nodeName!.trim()
         : _defaultNodeName;
+    final normalizedNodeId = (nodeId ?? '').trim();
     final incomingIdentity = await _readOutboundIdentity(configPath);
     final existingByName = VpnConfig.getNodeByName(normalizedName);
     final serviceName =
@@ -67,16 +123,26 @@ class XrayConfigWriter {
     final identityMatches = incomingIdentity == null || owner != null
         ? <VpnNode>[]
         : await _findNodesByIdentity(incomingIdentity);
+    final ownerMatches = owner == null
+        ? <VpnNode>[]
+        : _findManagedNodesForOwner(
+            owner: owner,
+            serviceName: serviceName,
+            nodeId: normalizedNodeId,
+            configPath: configPath,
+            normalizedName: normalizedName,
+          );
     final activeNodeName = GlobalState.activeNodeName.value.trim();
-    VpnNode? existing = identityMatches.cast<VpnNode?>().firstWhere(
+    final candidateMatches = owner != null ? ownerMatches : identityMatches;
+    VpnNode? existing = candidateMatches.cast<VpnNode?>().firstWhere(
           (node) => (node?.name ?? '') == activeNodeName,
           orElse: () => null,
         );
-    existing ??= identityMatches.cast<VpnNode?>().firstWhere(
+    existing ??= candidateMatches.cast<VpnNode?>().firstWhere(
           (node) => (node?.serviceName ?? '') != _defaultServiceName,
           orElse: () => null,
         );
-    existing ??= identityMatches.isNotEmpty ? identityMatches.first : null;
+    existing ??= candidateMatches.isNotEmpty ? candidateMatches.first : null;
     existing ??= VpnConfig.allNodes.cast<VpnNode?>().firstWhere(
           (node) => node?.serviceName == serviceName,
           orElse: () => null,
@@ -97,8 +163,8 @@ class XrayConfigWriter {
       }
     }
 
-    if (identityMatches.length > 1 && existing != null) {
-      for (final duplicate in identityMatches) {
+    if (candidateMatches.length > 1 && existing != null) {
+      for (final duplicate in candidateMatches) {
         if (duplicate.name != existing.name) {
           VpnConfig.removeNode(duplicate.name);
         }
@@ -132,6 +198,8 @@ class XrayConfigWriter {
       managedOwner: owner,
       managedTeamId: teamId,
       managedNodeId: nodeId,
+      routingPool: _nullableValue(routingPool),
+      pricingGroup: _nullableValue(pricingGroup),
     );
     if (existing == null) {
       VpnConfig.addNode(node);
@@ -140,6 +208,38 @@ class XrayConfigWriter {
     }
     await VpnConfig.saveToFile();
     return node.name;
+  }
+
+  static List<VpnNode> _findManagedNodesForOwner({
+    required String owner,
+    required String serviceName,
+    required String nodeId,
+    required String configPath,
+    required String normalizedName,
+  }) {
+    final targetPath = File(configPath).absolute.path;
+    return VpnConfig.allNodes.where((node) {
+      if (!node.isManaged || node.managedOwner != owner) return false;
+      if (node.serviceName == serviceName) return true;
+      if (nodeId.isNotEmpty && (node.managedNodeId ?? '').trim() == nodeId) {
+        return true;
+      }
+      if (File(node.configPath).absolute.path == targetPath) return true;
+      final existingNodeId = (node.managedNodeId ?? '').trim();
+      if (node.name == normalizedName &&
+          (nodeId.isEmpty ||
+              existingNodeId.isEmpty ||
+              existingNodeId == nodeId)) {
+        return true;
+      }
+      return false;
+    }).toList();
+  }
+
+  static String? _nullableValue(String? value) {
+    if (value == null) return null;
+    final trimmed = value.trim();
+    return trimmed.isEmpty ? null : trimmed;
   }
 
   static Future<void> pruneSyncedNodes(Set<String> retainedNames,

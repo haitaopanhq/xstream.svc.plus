@@ -1964,18 +1964,67 @@ class NativeBridge {
     }
   }
 
+  /// Refreshes the persisted iOS Packet Tunnel profile after a node config sync
+  /// so system-initiated reconnects pick up newly synced routing/outbound
+  /// changes without creating a new VPN configuration if none was saved.
+  static Future<String> refreshPersistedIosPacketTunnelProfile() async {
+    if (!Platform.isIOS) return 'unsupported';
+    _ensureDarwinFlutterApiReady();
+    try {
+      final saved = await _darwinHostApi.savedPacketTunnelProfile();
+      if (saved == null) return 'profile_missing';
+      VpnNode? matchingNode;
+      final savedNodeId = (saved.nodeId ?? '').trim();
+      if (savedNodeId.isNotEmpty) {
+        for (final node in VpnConfig.nodes) {
+          if (node.managedNodeId == savedNodeId) {
+            matchingNode = node;
+            break;
+          }
+        }
+      }
+      if (matchingNode == null) {
+        final savedStem =
+            saved.configPath.replaceFirst('.runtime.json', '.json');
+        for (final node in VpnConfig.nodes) {
+          if (node.configPath == saved.configPath ||
+              node.configPath == savedStem) {
+            matchingNode = node;
+            break;
+          }
+        }
+      }
+      if (matchingNode != null) {
+        return await prepareNodeForTunnel(matchingNode.name);
+      }
+      return await refreshPersistedTunnelProfileTuning();
+    } on MissingPluginException {
+      return 'unsupported';
+    } catch (e) {
+      addAppLog(
+        'iOS Packet Tunnel profile sync refresh failed: $e',
+        level: LogLevel.warning,
+      );
+      return 'failed: $e';
+    }
+  }
+
   /// Re-applies current tuning to a persisted runtime config: withdrawn XHTTP
   /// overrides return to their recorded originals and the DNS section is
-  /// rebuilt. Node addresses, already pinned, are left alone. Returns null
-  /// when nothing changes.
+  /// rebuilt. Node addresses, already pinned, as well as synced routing rules
+  /// and `domainStrategy`, are preserved. Returns null when nothing changes.
   static String? rewritePersistedTunnelConfig(String raw, {String? nodeId}) {
     final config = jsonDecode(raw) as Map<String, dynamic>;
+    final preservedSyncedRoutingMeta =
+        config[VpnConfig.syncedRoutingMetadataKey];
     VpnConfig.applyXhttpAdvancedSettings(config, nodeId: nodeId);
     if (config['dns'] is Map) {
       config['dns'] = VpnConfig.buildSecureDnsConfig();
     }
     if (config['routing'] is Map) {
-      final savedRouting = config['routing'] as Map<String, dynamic>;
+      final savedRouting = Map<String, dynamic>.from(
+        config['routing'] as Map,
+      );
       final isAllVpn = VpnConfig.isRoutingAllTunnelTraffic(savedRouting);
       final dnsOutboundTag =
           VpnConfig.findTunnelDnsOutboundTag(savedRouting) ?? 'proxy';
@@ -1985,6 +2034,9 @@ class NativeBridge {
         tunnelDnsOutboundTag: dnsOutboundTag,
         routeAllTunnelTraffic: isAllVpn,
       );
+    }
+    if (preservedSyncedRoutingMeta != null) {
+      config[VpnConfig.syncedRoutingMetadataKey] = preservedSyncedRoutingMeta;
     }
     final updated = const JsonEncoder.withIndent('  ').convert(config);
     return updated == raw ? null : updated;

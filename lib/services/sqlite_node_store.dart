@@ -1,6 +1,7 @@
 import 'dart:ffi';
 import 'dart:io';
 
+import 'package:flutter/foundation.dart';
 import 'package:path/path.dart' as p;
 import 'package:sqlite3/open.dart';
 import 'package:sqlite3/sqlite3.dart';
@@ -9,6 +10,12 @@ import '../utils/global_config.dart';
 
 class SqliteNodeStore {
   static Database? _db;
+
+  @visibleForTesting
+  static void resetForTesting() {
+    _db?.dispose();
+    _db = null;
+  }
 
   static void _configureLinuxLibrary() {
     if (Platform.isLinux) {
@@ -60,7 +67,9 @@ class SqliteNodeStore {
     for (final column in [
       'managed_owner',
       'managed_team_id',
-      'managed_node_id'
+      'managed_node_id',
+      'routing_pool',
+      'pricing_group',
     ]) {
       if (!columns.contains(column)) {
         db.execute('ALTER TABLE vpn_nodes ADD COLUMN $column TEXT');
@@ -74,7 +83,9 @@ class SqliteNodeStore {
     final db = await _openDb();
     final rs = db.select('''
       SELECT name, country_code, config_path, service_name,
-             protocol, transport, security, enabled, managed_owner, managed_team_id, managed_node_id
+             protocol, transport, security, enabled,
+             managed_owner, managed_team_id, managed_node_id,
+             routing_pool, pricing_group
       FROM vpn_nodes
       ORDER BY updated_at DESC, name ASC
     ''');
@@ -92,6 +103,8 @@ class SqliteNodeStore {
         'managedOwner': row['managed_owner'],
         'managedTeamId': row['managed_team_id'],
         'managedNodeId': row['managed_node_id'],
+        'routingPool': row['routing_pool'],
+        'pricingGroup': row['pricing_group'],
       };
     }).toList();
   }
@@ -106,8 +119,10 @@ class SqliteNodeStore {
       final stmt = db.prepare('''
         INSERT INTO vpn_nodes(
           name, country_code, config_path, service_name,
-          protocol, transport, security, enabled, updated_at, managed_owner, managed_team_id, managed_node_id
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+          protocol, transport, security, enabled, updated_at,
+          managed_owner, managed_team_id, managed_node_id,
+          routing_pool, pricing_group
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
       ''');
       try {
         for (final node in nodes) {
@@ -124,6 +139,8 @@ class SqliteNodeStore {
             node['managedOwner'],
             node['managedTeamId'],
             node['managedNodeId'],
+            node['routingPool'] ?? node['routing_pool'],
+            node['pricingGroup'] ?? node['pricing_group'],
           ]);
         }
       } finally {

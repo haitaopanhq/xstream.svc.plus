@@ -31,6 +31,11 @@ class SyncedNodeMetadata {
   final String? transport;
   final String? security;
   final String vlessUri;
+  final String? routingPool;
+  final String? pricingGroup;
+  final String? domainStrategy;
+  final List<Map<String, dynamic>> routingRules;
+  final Map<String, dynamic>? routing;
 
   const SyncedNodeMetadata({
     required this.id,
@@ -40,6 +45,11 @@ class SyncedNodeMetadata {
     this.protocol,
     this.transport,
     this.security,
+    this.routingPool,
+    this.pricingGroup,
+    this.domainStrategy,
+    this.routingRules = const [],
+    this.routing,
   });
 }
 
@@ -57,6 +67,16 @@ class DesktopSyncService {
   static const _autoInterval = Duration(minutes: 10);
   @visibleForTesting
   late http.Client client = http.Client();
+  @visibleForTesting
+  Future<String> Function()? stopTunnelForTesting;
+  @visibleForTesting
+  Future<String> Function(String nodeName)? startTunnelForTesting;
+  @visibleForTesting
+  Future<String> Function(String nodeName)? stopNodeServiceForTesting;
+  @visibleForTesting
+  Future<String> Function(String nodeName)? startNodeServiceForTesting;
+  @visibleForTesting
+  Future<String> Function()? refreshIosPacketTunnelProfileForTesting;
   final syncing = ValueNotifier<bool>(false);
   Timer? _timer;
   Timer? _expiryTimer;
@@ -232,6 +252,10 @@ class DesktopSyncService {
       policy.authorizedNodeIds = nodes.map((n) => n.id).toSet();
       if (policy.dedicated) await _stopUnauthorizedActiveNode();
       final retained = <String>{};
+      final activeNodeName = GlobalState.activeNodeName.value.trim();
+      var anyConfigModified = false;
+      var activeConfigUpdated = false;
+      String? activeUpdatedNodeName;
       for (final node in nodes) {
         if (generation != session.generation) {
           await clearManagedConnections();
@@ -240,13 +264,18 @@ class DesktopSyncService {
             message: 'Session changed',
           );
         }
-        final config = await VpnConfig.tryGenerateXrayJsonFromVlessUri(
+        final config = await VpnConfig.generateSyncedXrayJsonConfig(
           node.vlessUri,
+          routingRules: node.routingRules,
+          domainStrategy: node.domainStrategy,
+          routingPool: node.routingPool,
+          pricingGroup: node.pricingGroup,
+          routing: node.routing,
         );
         if (!_isRenderable(config)) {
           throw FormatException('区域节点 ${node.name} 的 VLESS 配置不可用');
         }
-        final path = await XrayConfigWriter.writeConfigForNode(
+        final writeResult = await XrayConfigWriter.writeConfigForNodeWithResult(
           json: config!,
           nodeName: node.name,
           countryCode: node.region,
@@ -255,7 +284,7 @@ class DesktopSyncService {
           teamId: policy.teamId,
         );
         final name = await XrayConfigWriter.registerNode(
-          configPath: path,
+          configPath: writeResult.path,
           nodeName: node.name,
           countryCode: node.region,
           protocol: node.protocol,
@@ -264,8 +293,17 @@ class DesktopSyncService {
           nodeId: node.id,
           owner: owner,
           teamId: policy.teamId,
+          routingPool: node.routingPool,
+          pricingGroup: node.pricingGroup,
         );
         retained.add(name);
+        if (writeResult.modified) {
+          anyConfigModified = true;
+          if (activeNodeName.isNotEmpty && name == activeNodeName) {
+            activeConfigUpdated = true;
+            activeUpdatedNodeName = name;
+          }
+        }
       }
       if (generation != session.generation) {
         await clearManagedConnections();
@@ -299,6 +337,11 @@ class DesktopSyncService {
           success: false,
           message: 'Session changed',
         );
+      }
+      if (activeConfigUpdated && activeUpdatedNodeName != null) {
+        await _reloadActiveNode(activeUpdatedNodeName);
+      } else if (anyConfigModified) {
+        await _refreshPersistedIosProfileIfApplicable();
       }
       _scheduleAccessExpiry();
       GlobalState.nodeListRevision.value++;
@@ -571,6 +614,58 @@ class DesktopSyncService {
     }
   }
 
+  Future<void> _reloadActiveNode(String nodeName) async {
+    try {
+      final useTunMode = NativeBridge.isTunMode;
+      addAppLog('区域节点配置已更新，正在重载当前连接: $nodeName');
+      if (useTunMode) {
+        final stopMsg = await (stopTunnelForTesting != null
+            ? stopTunnelForTesting!()
+            : NativeBridge.stopNodeForTunnel());
+        addAppLog('[sync reload] $stopMsg');
+        final startMsg = await (startTunnelForTesting != null
+            ? startTunnelForTesting!(nodeName)
+            : NativeBridge.startNodeForTunnel(nodeName));
+        addAppLog('[sync reload] $startMsg');
+        if (startMsg.contains('失败') || startMsg.contains('not authorized')) {
+          GlobalState.activeNodeName.value = '';
+        }
+      } else {
+        final stopMsg = await (stopNodeServiceForTesting != null
+            ? stopNodeServiceForTesting!(nodeName)
+            : NativeBridge.stopNodeService(nodeName));
+        addAppLog('[sync reload] $stopMsg');
+        final startMsg = await (startNodeServiceForTesting != null
+            ? startNodeServiceForTesting!(nodeName)
+            : NativeBridge.startNodeService(nodeName));
+        addAppLog('[sync reload] $startMsg');
+        if (startNodeServiceForTesting == null) {
+          final running = await NativeBridge.checkNodeStatus(nodeName);
+          if (!running) {
+            GlobalState.activeNodeName.value = '';
+          }
+        }
+        await _refreshPersistedIosProfileIfApplicable();
+      }
+    } catch (error) {
+      addAppLog('同步后重载活动节点失败: $error', level: LogLevel.warning);
+    }
+  }
+
+  Future<void> _refreshPersistedIosProfileIfApplicable() async {
+    try {
+      if (refreshIosPacketTunnelProfileForTesting != null) {
+        await refreshIosPacketTunnelProfileForTesting!();
+        return;
+      }
+      if (!Platform.isIOS) return;
+      await NativeBridge.refreshPersistedIosPacketTunnelProfile();
+    } catch (error) {
+      addAppLog('同步后刷新 iOS Packet Tunnel 配置失败: $error',
+          level: LogLevel.warning);
+    }
+  }
+
   void _onSessionChanged() {
     _timer?.cancel();
     SyncStateStore.instance.clearTransientError(sessionExpiredMessage);
@@ -583,14 +678,28 @@ class DesktopSyncService {
     _timer = Timer.periodic(_autoInterval, (_) => unawaited(syncNow()));
   }
 
+  @visibleForTesting
+  SyncedNodeMetadata? parseNodeForTesting(Map<Object?, Object?> node) =>
+      _parseNode(node);
+
   SyncedNodeMetadata? _parseNode(Map<Object?, Object?> node) {
-    String value(List<String> keys) {
+    String valueFrom(Map<Object?, Object?> source, List<String> keys) {
       for (final key in keys) {
-        final raw = node[key];
+        final raw = source[key];
         if (raw is String && raw.trim().isNotEmpty) return raw.trim();
       }
       return '';
     }
+
+    String? nullableValueFrom(
+      Map<Object?, Object?> source,
+      List<String> keys,
+    ) {
+      final found = valueFrom(source, keys);
+      return found.isEmpty ? null : found;
+    }
+
+    String value(List<String> keys) => valueFrom(node, keys);
 
     final id = value(['id', 'address']);
     final name = value(['name', 'display_name', 'remark', 'region', 'id']);
@@ -601,6 +710,32 @@ class DesktopSyncService {
       'uri',
     ]);
     if (id.isEmpty || name.isEmpty || !uri.startsWith('vless://')) return null;
+
+    final rawRouting = node['routing'];
+    final routingMap = rawRouting is Map ? _normalizeJsonMap(rawRouting) : null;
+    final routingPool = nullableValueFrom(
+      node,
+      const ['routing_pool', 'routingPool', 'pool'],
+    );
+    final pricingGroup = nullableValueFrom(
+      node,
+      const ['pricing_group', 'pricingGroup'],
+    );
+    final domainStrategy = nullableValueFrom(
+          node,
+          const ['domain_strategy', 'domainStrategy'],
+        ) ??
+        (routingMap == null
+            ? null
+            : nullableValueFrom(
+                routingMap,
+                const ['domainStrategy', 'domain_strategy'],
+              ));
+    final routingRules = _extractRoutingRules(
+      node,
+      routingMap,
+    );
+
     return SyncedNodeMetadata(
       id: id,
       name: name,
@@ -609,7 +744,54 @@ class DesktopSyncService {
       protocol: value(['protocol']),
       transport: value(['transport', 'network']),
       security: value(['security']),
+      routingPool: routingPool,
+      pricingGroup: pricingGroup,
+      domainStrategy: domainStrategy,
+      routingRules: routingRules,
+      routing: routingMap,
     );
+  }
+
+  static List<Map<String, dynamic>> _extractRoutingRules(
+    Map<Object?, Object?> node,
+    Map<String, dynamic>? routingMap,
+  ) {
+    final candidates = <Object?>[
+      node['routing_rules'],
+      node['routingRules'],
+      routingMap?['rules'],
+      routingMap?['routing_rules'],
+      routingMap?['routingRules'],
+    ];
+    for (final candidate in candidates) {
+      if (candidate is! List || candidate.isEmpty) continue;
+      final normalized = candidate
+          .whereType<Map>()
+          .map(_normalizeJsonMap)
+          .where((rule) => rule.isNotEmpty)
+          .toList();
+      if (normalized.isNotEmpty) return normalized;
+    }
+    return const <Map<String, dynamic>>[];
+  }
+
+  static Map<String, dynamic> _normalizeJsonMap(Map<Object?, Object?> raw) {
+    final result = <String, dynamic>{};
+    raw.forEach((key, value) {
+      if (key == null) return;
+      result[key.toString()] = _normalizeJsonValue(value);
+    });
+    return result;
+  }
+
+  static Object? _normalizeJsonValue(Object? value) {
+    if (value is Map) {
+      return _normalizeJsonMap(value);
+    }
+    if (value is List) {
+      return value.map(_normalizeJsonValue).toList();
+    }
+    return value;
   }
 
   static bool _isRenderable(String? raw) {

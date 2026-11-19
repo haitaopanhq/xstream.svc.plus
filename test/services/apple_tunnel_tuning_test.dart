@@ -215,4 +215,65 @@ void main() {
     expect(NativeBridge.rewritePersistedTunnelConfig(rewritten, nodeId: 'jp-1'),
         isNull);
   });
+
+  test(
+      'rewritePersistedTunnelConfig preserves synced routing rules and domainStrategy',
+      () {
+    ClientTuning.profileForTesting = ClientTuningProfile.fromJson(_document());
+    final runtime = <String, dynamic>{
+      'dns': VpnConfig.buildSecureDnsConfig(),
+      'outbounds': <dynamic>[
+        <String, dynamic>{
+          'tag': 'proxy',
+          'protocol': 'vless',
+          'settings': <String, dynamic>{
+            'vnext': <dynamic>[
+              <String, dynamic>{'address': '203.0.113.7', 'port': 443},
+            ],
+          },
+          'streamSettings': <String, dynamic>{
+            'network': 'xhttp',
+            'xhttpSettings': <String, dynamic>{
+              'path': '/split',
+              'extra': <String, dynamic>{'xmux': <String, dynamic>{}},
+            },
+          },
+        },
+      ],
+      'routing': <String, dynamic>{
+        'domainStrategy': 'AsIs',
+        'rules': <dynamic>[],
+      },
+    };
+    final tierRules = <Map<String, dynamic>>[
+      <String, dynamic>{
+        'type': 'field',
+        'domain': <String>['geosite:cn'],
+        'outboundTag': 'direct',
+      },
+      <String, dynamic>{
+        'type': 'field',
+        'outboundTag': 'proxy',
+      },
+    ];
+    VpnConfig.applySyncedRoutingConfig(
+      runtime,
+      routingRules: tierRules,
+      domainStrategy: 'IPIfNonMatch',
+    );
+    VpnConfig.applyXhttpAdvancedSettings(runtime, nodeId: 'jp-1');
+    final persisted = jsonEncode(runtime);
+
+    ClientTuning.profileForTesting = null;
+    final rewritten =
+        NativeBridge.rewritePersistedTunnelConfig(persisted, nodeId: 'jp-1');
+    expect(rewritten, isNotNull);
+    final decoded = jsonDecode(rewritten!) as Map<String, dynamic>;
+    final routing = decoded['routing'] as Map<String, dynamic>;
+    expect(routing['domainStrategy'], 'IPIfNonMatch');
+    expect(routing['rules'], containsAllInOrder(tierRules));
+    expect(decoded[VpnConfig.syncedRoutingMetadataKey], isNotNull);
+    expect(NativeBridge.rewritePersistedTunnelConfig(rewritten, nodeId: 'jp-1'),
+        isNull);
+  });
 }
