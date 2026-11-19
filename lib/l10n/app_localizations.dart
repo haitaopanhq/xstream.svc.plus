@@ -158,11 +158,6 @@ class AppLocalizations {
       'settingsTabSystem': 'System Settings',
       'nodeSourceManaged': 'Managed',
       'nodeSourceImported': 'Imported',
-      'proStreamingNoticeTitle':
-          'Pro Node — Recommended for Normal, AI & Dev Traffic',
-      'proStreamingNoticeBody':
-          'Pro nodes allow normal traffic and are tuned for AI, dev, and office use rather than high-bandwidth video apps, game downloads, or speedtests. Please switch to a Plus or Shared (Media-Pool) node for heavy streaming or downloads.',
-      'proStreamingNoticeSwitch': 'Switch Node',
       'settingsTabDiagnostics': 'Diagnostics',
       'diagTitle': 'Network self-diagnosis',
       'diagIdleHint': 'Measures latency and packet loss to your node.',
@@ -580,10 +575,6 @@ curl -I --proxy socks5h://127.0.0.1:1080 --max-time 15 https://grok.com''',
       'proxySettings': '代理设置',
       'serviceRunning': '⚠️ 服务已在运行',
       'noNodes': '暂无连接，请先添加一个连接。',
-      'proStreamingNoticeTitle': 'Pro 节点适用提示',
-      'proStreamingNoticeBody':
-          'Pro 节点允许正常请求通过，但主要面向 AI、开发与办公场景；不建议用于高流量视频 APP、游戏下载或测速，此类高流量场景建议切换至 Plus / Shared 节点（最终以服务端流量管控为准）。',
-      'proStreamingNoticeSwitch': '切换节点',
       'generateSave': '保存连接',
       'addNodeConfig': '添加连接',
       'vlessUri': '连接链接（可选）',

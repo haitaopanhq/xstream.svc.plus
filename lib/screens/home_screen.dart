@@ -48,15 +48,6 @@ bool shouldStopInsteadOfStart({
   return hasLiveTunnel || tunnelPending;
 }
 
-/// Returns true when [node] routes through `Pro-EC2-Pool` or has
-/// `pricingGroup == 'pro'`, where video/streaming traffic is restricted.
-bool isProTierNode(VpnNode? node) {
-  if (node == null) return false;
-  final pool = (node.routingPool ?? '').trim().toLowerCase();
-  final pricing = (node.pricingGroup ?? '').trim().toLowerCase();
-  return pool == 'pro-ec2-pool' || pricing == 'pro';
-}
-
 class HomeScreen extends StatefulWidget {
   const HomeScreen({super.key});
 
@@ -549,11 +540,6 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
     return vpnNodes.isNotEmpty ? vpnNodes.first : null;
   }
 
-  void _maybeNotifyProTierNode(VpnNode? node) {
-    if (!mounted || !isProTierNode(node)) return;
-    _showMessage(context.l10n.get('proStreamingNoticeBody'));
-  }
-
   void _selectNode(VpnNode node) {
     setState(() {
       _selectedNode = node.name;
@@ -562,7 +548,6 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
       GlobalState.lastImportedNodeName.value = node.name;
     });
     _scheduleClearHighlight();
-    _maybeNotifyProTierNode(node);
   }
 
   Future<void> _toggleFromFloatingButton() async {
@@ -667,7 +652,6 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
       GlobalState.activeNodeName.value = nodeName;
       _syncConnectedMeta();
       _showMessage(msg);
-      _maybeNotifyProTierNode(node);
       _scheduleClearHighlight();
 
       // ── Verify connectivity ───────────────────────────────────────
