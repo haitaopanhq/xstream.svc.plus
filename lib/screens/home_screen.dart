@@ -1244,6 +1244,14 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
       borderSide = BorderSide(color: xc.brandBorder);
     }
 
+    final routingPool = (node.routingPool ?? '').trim();
+    final sourceLabel = context.l10n.get(
+      node.isManaged ? 'nodeSourceManaged' : 'nodeSourceImported',
+    );
+    final labelText = latency == null
+        ? '${node.name} · $sourceLabel'
+        : '${node.name} · $sourceLabel · ${latency}ms';
+
     return Semantics(
       button: true,
       selected: emphasized,
@@ -1265,12 +1273,35 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
                 ),
               )
             : null,
-        label: Text(
-          latency == null
-              ? '${node.name} · ${context.l10n.get(node.isManaged ? 'nodeSourceManaged' : 'nodeSourceImported')}'
-              : '${node.name} · ${context.l10n.get(node.isManaged ? 'nodeSourceManaged' : 'nodeSourceImported')} · ${latency}ms',
-          overflow: TextOverflow.ellipsis,
-        ),
+        label: routingPool.isEmpty
+            ? Text(labelText, overflow: TextOverflow.ellipsis)
+            : Row(
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  Flexible(
+                    child: Text(labelText, overflow: TextOverflow.ellipsis),
+                  ),
+                  const SizedBox(width: 6),
+                  Container(
+                    padding:
+                        const EdgeInsets.symmetric(horizontal: 6, vertical: 1),
+                    decoration: BoxDecoration(
+                      color: cs.primary.withValues(alpha: 0.12),
+                      borderRadius: BorderRadius.circular(999),
+                      border: Border.all(
+                        color: cs.primary.withValues(alpha: 0.3),
+                      ),
+                    ),
+                    child: Text(
+                      routingPool.toUpperCase(),
+                      style: Theme.of(context).textTheme.labelSmall?.copyWith(
+                            color: labelColor,
+                            fontWeight: FontWeight.w600,
+                          ),
+                    ),
+                  ),
+                ],
+              ),
         labelStyle: Theme.of(
           context,
         ).textTheme.labelLarge?.copyWith(

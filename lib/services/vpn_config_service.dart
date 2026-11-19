@@ -87,6 +87,8 @@ class VpnNode {
   String? managedOwner;
   String? managedTeamId;
   String? managedNodeId;
+  String? routingPool;
+  String? pricingGroup;
 
   VpnNode({
     required this.name,
@@ -100,11 +102,19 @@ class VpnNode {
     this.managedOwner,
     this.managedTeamId,
     this.managedNodeId,
+    this.routingPool,
+    this.pricingGroup,
   }) {
     checkNotEmpty(name, 'name');
     checkNotEmpty(countryCode, 'countryCode');
     checkNotEmpty(configPath, 'configPath');
     checkNotEmpty(serviceName, 'serviceName');
+  }
+
+  static String? _nullableField(Object? raw) {
+    if (raw is! String) return null;
+    final trimmed = raw.trim();
+    return trimmed.isEmpty ? null : trimmed;
   }
 
   factory VpnNode.fromJson(Map<String, dynamic> json) {
@@ -133,6 +143,9 @@ class VpnNode {
       managedOwner: json['managedOwner'] as String?,
       managedTeamId: json['managedTeamId'] as String?,
       managedNodeId: json['managedNodeId'] as String?,
+      routingPool: _nullableField(json['routingPool'] ?? json['routing_pool']),
+      pricingGroup:
+          _nullableField(json['pricingGroup'] ?? json['pricing_group']),
     );
   }
 
@@ -149,6 +162,8 @@ class VpnNode {
       'managedOwner': managedOwner,
       'managedTeamId': managedTeamId,
       'managedNodeId': managedNodeId,
+      'routingPool': routingPool,
+      'pricingGroup': pricingGroup,
     };
   }
 }
@@ -686,6 +701,285 @@ class VpnConfig {
     } catch (_) {
       return null;
     }
+  }
+
+  /// Top-level metadata key recording server-synced routing overrides so
+  /// repeated syncs remain idempotent without mutating manual imports.
+  static const syncedRoutingMetadataKey = 'xconnectSyncedRouting';
+
+  /// Generates Xray JSON for a synced node by layering optional server-supplied
+  /// tier routing rules and `domainStrategy` onto the standard VLESS config.
+  static Future<String?> generateSyncedXrayJsonConfig(
+    String vlessUri, {
+    List<dynamic> routingRules = const [],
+    String? domainStrategy,
+    String? routingPool,
+    String? pricingGroup,
+    Map<dynamic, dynamic>? routing,
+  }) async {
+    final baseJson = await tryGenerateXrayJsonFromVlessUri(vlessUri);
+    if (baseJson == null || baseJson.trim().isEmpty) return null;
+    final hasStrategy = (domainStrategy ?? '').trim().isNotEmpty;
+    if (routingRules.isEmpty && !hasStrategy && routing == null) {
+      return baseJson;
+    }
+    try {
+      final decoded = jsonDecode(baseJson);
+      if (decoded is! Map) return baseJson;
+      final config = _deepNormalizeMap(decoded);
+      final changed = applySyncedRoutingConfig(
+        config,
+        routingRules: routingRules,
+        domainStrategy: domainStrategy,
+        routingPool: routingPool,
+        pricingGroup: pricingGroup,
+        routing: routing,
+      );
+      if (!changed) return baseJson;
+      return const JsonEncoder.withIndent('  ').convert(config);
+    } catch (_) {
+      return baseJson;
+    }
+  }
+
+  /// Idempotently applies server-supplied client routing rules and
+  /// `domainStrategy` onto [config], keeping specific/tier rules ordered
+  /// before any catch-all rule and avoiding rule duplication across re-syncs.
+  static bool applySyncedRoutingConfig(
+    Map<String, dynamic> config, {
+    List<dynamic> routingRules = const [],
+    String? domainStrategy,
+    String? routingPool,
+    String? pricingGroup,
+    Map<dynamic, dynamic>? routing,
+  }) {
+    final routingParam = routing == null ? null : _deepNormalizeMap(routing);
+    final effectiveDomainStrategy = _firstNonEmptyNullable(
+      domainStrategy,
+      routingParam?['domainStrategy'] as String? ??
+          routingParam?['domain_strategy'] as String?,
+    );
+    final rawIncomingRules = routingRules.isNotEmpty
+        ? routingRules
+        : (routingParam?['rules'] as List<dynamic>? ??
+            routingParam?['routing_rules'] as List<dynamic>? ??
+            routingParam?['routingRules'] as List<dynamic>? ??
+            const <dynamic>[]);
+    final normalizedIncomingRules = rawIncomingRules
+        .whereType<Map>()
+        .map((rule) => _deepNormalizeMap(rule))
+        .where((rule) => rule.isNotEmpty)
+        .toList();
+
+    final prevMetaRaw = config[syncedRoutingMetadataKey];
+    final prevMeta = prevMetaRaw is Map ? _deepNormalizeMap(prevMetaRaw) : null;
+    if (normalizedIncomingRules.isEmpty &&
+        effectiveDomainStrategy == null &&
+        prevMeta == null) {
+      return false;
+    }
+
+    final beforeRouting = _canonicalJsonKey(config['routing']);
+    final beforeMeta = _canonicalJsonKey(config[syncedRoutingMetadataKey]);
+
+    final currentRouting = config['routing'] is Map
+        ? _deepNormalizeMap(config['routing'] as Map)
+        : <String, dynamic>{};
+    final existingRawRules = List<dynamic>.from(
+      currentRouting['rules'] as List<dynamic>? ?? const <dynamic>[],
+    );
+
+    final prevRuleKeys = <String>{};
+    if (prevMeta != null && prevMeta['rules'] is List) {
+      for (final rule in prevMeta['rules'] as List) {
+        if (rule is Map) {
+          prevRuleKeys.add(_canonicalJsonKey(rule));
+        }
+      }
+    }
+
+    final baseSpecificRules = <dynamic>[];
+    final baseCatchAllRules = <dynamic>[];
+    final seenKeys = <String>{};
+    for (final rawRule in existingRawRules) {
+      final normalizedRule =
+          rawRule is Map ? _deepNormalizeMap(rawRule) : rawRule;
+      if (normalizedRule is Map) {
+        final key = _canonicalJsonKey(normalizedRule);
+        if (prevRuleKeys.contains(key)) {
+          continue;
+        }
+        if (!seenKeys.add(key)) {
+          continue;
+        }
+      }
+      if (_isCatchAllRoutingRule(normalizedRule)) {
+        baseCatchAllRules.add(normalizedRule);
+      } else {
+        baseSpecificRules.add(normalizedRule);
+      }
+    }
+
+    final syncedSpecificRules = <Map<String, dynamic>>[];
+    final syncedCatchAllRules = <Map<String, dynamic>>[];
+    final appliedRules = <Map<String, dynamic>>[];
+    for (final rule in normalizedIncomingRules) {
+      final key = _canonicalJsonKey(rule);
+      appliedRules.add(rule);
+      if (!seenKeys.add(key)) {
+        continue;
+      }
+      if (_isCatchAllRoutingRule(rule)) {
+        syncedCatchAllRules.add(rule);
+      } else {
+        syncedSpecificRules.add(rule);
+      }
+    }
+
+    currentRouting['rules'] = <dynamic>[
+      ...baseSpecificRules,
+      ...syncedSpecificRules,
+      ...baseCatchAllRules,
+      ...syncedCatchAllRules,
+    ];
+
+    String? originalDomainStrategy =
+        prevMeta?['originalDomainStrategy'] as String?;
+    if (effectiveDomainStrategy != null) {
+      originalDomainStrategy ??=
+          _firstNonEmptyNullable(currentRouting['domainStrategy'] as String?);
+      currentRouting['domainStrategy'] = effectiveDomainStrategy;
+    } else if (prevMeta != null) {
+      final prevAppliedStrategy =
+          _firstNonEmptyNullable(prevMeta['domainStrategy'] as String?);
+      final currentStrategy =
+          _firstNonEmptyNullable(currentRouting['domainStrategy'] as String?);
+      if (prevAppliedStrategy != null &&
+          currentStrategy == prevAppliedStrategy) {
+        currentRouting['domainStrategy'] = originalDomainStrategy ?? 'AsIs';
+      }
+    }
+
+    final nextMeta = (appliedRules.isEmpty && effectiveDomainStrategy == null)
+        ? null
+        : <String, dynamic>{
+            if (effectiveDomainStrategy != null)
+              'domainStrategy': effectiveDomainStrategy,
+            if (originalDomainStrategy != null)
+              'originalDomainStrategy': originalDomainStrategy,
+            if (appliedRules.isNotEmpty) 'rules': appliedRules,
+          };
+
+    final routingChanged = _canonicalJsonKey(currentRouting) != beforeRouting;
+    final metaChanged = _canonicalJsonKey(nextMeta) != beforeMeta;
+    if (!routingChanged && !metaChanged) {
+      return false;
+    }
+
+    config['routing'] = currentRouting;
+    if (nextMeta == null) {
+      config.remove(syncedRoutingMetadataKey);
+    } else {
+      config[syncedRoutingMetadataKey] = nextMeta;
+    }
+    return true;
+  }
+
+  static String? _firstNonEmptyNullable(String? first, [String? second]) {
+    if (first != null && first.trim().isNotEmpty) return first.trim();
+    if (second != null && second.trim().isNotEmpty) return second.trim();
+    return null;
+  }
+
+  static Map<String, dynamic> _deepNormalizeMap(Map<dynamic, dynamic> raw) {
+    final result = <String, dynamic>{};
+    raw.forEach((key, value) {
+      if (key == null) return;
+      result[key.toString()] = _deepNormalizeValue(value);
+    });
+    return result;
+  }
+
+  static dynamic _deepNormalizeValue(Object? value) {
+    if (value is Map) {
+      return _deepNormalizeMap(value);
+    }
+    if (value is List) {
+      return value.map(_deepNormalizeValue).toList();
+    }
+    return value;
+  }
+
+  static Object? _canonicalizeForJson(Object? value) {
+    if (value is Map) {
+      final entries = value.entries
+          .map((e) => MapEntry(e.key.toString(), _canonicalizeForJson(e.value)))
+          .toList()
+        ..sort((a, b) => a.key.compareTo(b.key));
+      return Map<String, dynamic>.fromEntries(entries);
+    }
+    if (value is List) {
+      return value.map(_canonicalizeForJson).toList();
+    }
+    return value;
+  }
+
+  static String _canonicalJsonKey(Object? value) =>
+      jsonEncode(_canonicalizeForJson(value));
+
+  static bool _isCatchAllRoutingRule(Object? rule) {
+    if (rule is! Map) return false;
+    final type = rule['type'];
+    if (type != null && type != 'field') return false;
+    final outboundTag = rule['outboundTag'];
+    final balancerTag = rule['balancerTag'];
+    final hasTarget =
+        (outboundTag is String && outboundTag.trim().isNotEmpty) ||
+            (balancerTag is String && balancerTag.trim().isNotEmpty);
+    if (!hasTarget) return false;
+
+    for (final listKey in const [
+      'domain',
+      'ip',
+      'source',
+      'user',
+      'inboundTag',
+      'protocol',
+    ]) {
+      final value = rule[listKey];
+      if (value is List && value.isNotEmpty) {
+        return false;
+      }
+    }
+
+    final attrs = rule['attrs'];
+    if (attrs is Map && attrs.isNotEmpty) return false;
+    if (attrs is String && attrs.trim().isNotEmpty) return false;
+
+    for (final portKey in const ['port', 'sourcePort']) {
+      final port = rule[portKey];
+      if (port == null) continue;
+      final normalized = port.toString().trim();
+      if (normalized.isNotEmpty &&
+          normalized != '0-65535' &&
+          normalized != '1-65535') {
+        return false;
+      }
+    }
+
+    final network = rule['network'];
+    if (network is String && network.trim().isNotEmpty) {
+      final parts = network
+          .split(',')
+          .map((p) => p.trim().toLowerCase())
+          .where((p) => p.isNotEmpty)
+          .toSet();
+      if (!(parts.contains('tcp') && parts.contains('udp'))) {
+        return false;
+      }
+    }
+
+    return true;
   }
 
   static Future<String> _generateXrayJsonConfig(
@@ -1549,7 +1843,9 @@ class VpnConfig {
           ((rule['ip'] as List).contains('fc00::/7') ||
               (rule['ip'] as List).contains('10.0.0.0/8') ||
               (rule['ip'] as List).contains('192.168.0.0/16') ||
-              (rule['ip'] as List).contains('geoip:private'))) {
+              (rule['ip'] as List).contains('geoip:private')) &&
+          !(rule['ip'] as List).any(
+              (e) => e is String && e.startsWith('geoip:') && e != 'geoip:private')) {
         return false;
       }
       if (type == 'field' &&
@@ -1559,16 +1855,19 @@ class VpnConfig {
           ((rule['domain'] as List).contains('full:localhost') ||
               (rule['domain'] as List).contains('domain:cn') ||
               (rule['domain'] as List).contains(r'regexp:^.*\.cn$') ||
-              (rule['domain'] as List).contains('geosite:cn') ||
               (rule['domain'] as List).contains('domain:baidu.com') ||
-              (rule['domain'] as List).contains('domain:apple.com'))) {
+              (rule['domain'] as List).contains('domain:apple.com')) &&
+          !(rule['domain'] as List)
+              .any((e) => e is String && e.startsWith('geosite:'))) {
         return false;
       }
       if (enableTunnelMode &&
           routeAllTunnelTraffic &&
           type == 'field' &&
           outboundTag == 'direct' &&
-          rule['domain'] != null) {
+          rule['domain'] != null &&
+          !(rule['domain'] as List)
+              .any((e) => e is String && e.startsWith('geosite:'))) {
         return false;
       }
       return true;
@@ -1588,8 +1887,25 @@ class VpnConfig {
       tunnelDnsOutboundTag: tunnelDnsOutboundTag,
       routeAllTunnelTraffic: enableTunnelMode && routeAllTunnelTraffic,
     );
-    routing['domainStrategy'] = 'AsIs';
-    routing['rules'] = <dynamic>[...secureDnsRules, ...existingRules];
+    final existingDomainStrategy = routing['domainStrategy'];
+    routing['domainStrategy'] = existingDomainStrategy is String &&
+            existingDomainStrategy.trim().isNotEmpty
+        ? existingDomainStrategy.trim()
+        : 'AsIs';
+    final specificRules = <dynamic>[];
+    final catchAllRules = <dynamic>[];
+    for (final rule in existingRules) {
+      if (_isCatchAllRoutingRule(rule)) {
+        catchAllRules.add(rule);
+      } else {
+        specificRules.add(rule);
+      }
+    }
+    routing['rules'] = <dynamic>[
+      ...secureDnsRules,
+      ...specificRules,
+      ...catchAllRules,
+    ];
     return routing;
   }
 
