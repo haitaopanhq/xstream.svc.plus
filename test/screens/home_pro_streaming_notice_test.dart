@@ -122,8 +122,10 @@ void main() {
       );
       await tester.pumpAndSettle();
 
-      expect(zhCopy, contains('Plus / Shared'));
-      expect(enCopy, contains('Media-Pool'));
+      expect(zhCopy, contains('高流量流媒体、游戏下载与测速'));
+      expect(zhCopy, contains('其他正常请求仍允许通过'));
+      expect(enCopy, contains('game downloads, and speedtests'));
+      expect(enCopy, contains('allowing other normal traffic'));
     });
   });
 }
