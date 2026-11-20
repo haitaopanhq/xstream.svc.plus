@@ -1,0 +1,218 @@
+<!doctype html>
+<html lang="{{lang}}">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>XConnect</title>
+  <style>
+    :root { color-scheme: light dark; font: 1rem/1.6 system-ui, sans-serif; }
+    body { max-width: 48rem; margin: 2rem auto; padding: 0 1rem; }
+    dt { font-weight: 650; margin-top: .65rem; }
+    dd { margin: 0; overflow-wrap: anywhere; }
+    button { padding: .5rem .8rem; margin: .25rem .25rem .25rem 0; font: inherit; }
+    textarea { color: inherit; width: 100%; min-height: 14rem; box-sizing: border-box; font: inherit; }
+  </style>
+</head>
+<body>
+  <main>
+    <h1 id="title">XConnect</h1>
+    <p id="scope"></p>
+    <dl id="settings"></dl>
+    <p id="lookup-scope"></p>
+    <button id="lookup" type="button"></button>
+    <p id="exit" aria-live="polite"></p>
+    <p id="differences"></p>
+    <h2 id="copy-title"></h2>
+    <p id="copy-scope"></p>
+    <textarea id="prompt" readonly></textarea>
+    <button id="copy" type="button"></button>
+    <p id="copy-status" role="status"></p>
+    <template id="system-prompt">{{systemPrompt}}</template>
+    <noscript>Enable JavaScript to check browser settings. 请启用 JavaScript 后重新检测。</noscript>
+  </main>
+  <script nonce="{{nonce}}">
+    'use strict';
+    const zh = document.documentElement.lang === 'zh-CN';
+    const t = (en, chinese) => zh ? chinese : en;
+    const byId = (id) => document.getElementById(id);
+    const unavailable = t('Unavailable', '不可用');
+    const title = t('Browser privacy check', '浏览器隐私检查');
+    document.title = title + ' · XConnect';
+    byId('title').textContent = title;
+    byId('scope').textContent = t(
+      'These settings come from this browser. A feature being available only means websites can attempt to use it. This page does not test DNS or WebRTC leaks or read existing cookies.',
+      '以下设置来自当前浏览器。功能可用表示网站可以尝试使用它。此页不检测 DNS 或 WebRTC 泄漏，也不读取已有 Cookie。'
+    );
+    byId('lookup-scope').textContent = t(
+      'Check the exit used by this browser with IPinfo. IPinfo sees your public IP and ordinary request headers. The settings below are processed on this device.',
+      '可通过 IPinfo 查询当前浏览器使用的出口。IPinfo 会看到公网 IP 和常规请求头。检测结果在本机处理。'
+    );
+    byId('copy-title').textContent = t('AI follow-up prompt', '给 AI 的后续检查提示词');
+    byId('copy-scope').textContent = t(
+      'Review before sharing. The prompt omits exact IP addresses, full User-Agent and individual font names.',
+      '分享前可先查看内容。提示词省略完整 IP、完整 User-Agent 和具体字体名称。'
+    );
+    byId('prompt').setAttribute('aria-labelledby', 'copy-title');
+    byId('copy').textContent = t('Copy AI prompt', '复制 AI 提示词');
+
+    function probe(check) {
+      try {
+        return check() ? t('Available', '可用') : unavailable;
+      } catch {
+        return unavailable;
+      }
+    }
+
+    const formatting = Intl.DateTimeFormat().resolvedOptions();
+    let localeRegion;
+    try {
+      localeRegion = new Intl.Locale(formatting.locale).region;
+    } catch {
+      // The browser may not expose a formatting region.
+    }
+    const screenSize = screen.width + ' × ' + screen.height +
+      ' CSS px · DPR ' + window.devicePixelRatio;
+    let canvas;
+    try {
+      canvas = document.createElement('canvas').getContext('2d');
+    } catch {
+      // Some privacy settings can restrict canvas operations.
+    }
+    const fontSample = ['Arial', 'Helvetica', 'Times New Roman', 'PingFang SC',
+      'Microsoft YaHei', 'Noto Sans CJK SC'];
+    const detectedFonts = [];
+    if (canvas) {
+      try {
+        const sample = 'mmmmmmmmmmlli中';
+        const genericFonts = ['monospace', 'serif', 'sans-serif'];
+        for (const font of fontSample) {
+          const detectable = genericFonts.every((generic) => {
+            canvas.font = '24px ' + generic;
+            const fallbackWidth = canvas.measureText(sample).width;
+            canvas.font = '24px "' + font + '", ' + generic;
+            return canvas.measureText(sample).width !== fallbackWidth;
+          });
+          if (detectable) detectedFonts.push(font);
+        }
+      } catch {
+        // Some privacy settings can restrict canvas operations.
+      }
+    }
+
+    const settings = [
+      [t('Browser time zone', '浏览器时区'), formatting.timeZone],
+      [t('Preferred languages', '首选语言'), (navigator.languages || []).join(', ') || navigator.language],
+      [t('Formatting locale', '格式区域'), formatting.locale],
+      [t('Region specified by locale', '语言区域中的地区码'), localeRegion],
+      ['User-Agent', navigator.userAgent, navigator.userAgent ?
+        t('Exposed (value omitted)', '可读（已省略值）') : unavailable],
+      [t('Screen size', '屏幕尺寸'), screenSize],
+      [t('Font samples (estimated)', '字体样本（估计）'),
+        detectedFonts.join(', ') || unavailable,
+        detectedFonts.length + ' / ' + fontSample.length],
+      ['Canvas', probe(() => {
+        if (!canvas) return false;
+        canvas.fillRect(0, 0, 1, 1);
+        return canvas.getImageData(0, 0, 1, 1).data[3] === 255;
+      })],
+      ['WebGL', probe(() => {
+        const surface = document.createElement('canvas');
+        return surface.getContext('webgl2') || surface.getContext('webgl');
+      })],
+      [t('Web Audio API', 'Web 音频 API'), probe(() => window.OfflineAudioContext)],
+      [t('WebRTC API', 'WebRTC API'), probe(() => window.RTCPeerConnection)],
+      [t('Cookie setting reported by browser', '浏览器报告的 Cookie 设置'),
+        navigator.cookieEnabled ? t('Enabled', '已启用') : t('Disabled', '已禁用')],
+    ];
+
+    for (const [label, value] of settings) {
+      const term = document.createElement('dt');
+      const description = document.createElement('dd');
+      term.textContent = label;
+      description.textContent = value || unavailable;
+      byId('settings').append(term, description);
+    }
+
+    let exitSummary = t('Browser exit not checked', '未查询浏览器出口');
+    let differenceNote = '';
+    function updatePrompt() {
+      const browserRows = settings.map(([label, value, share]) =>
+        '- ' + label + ' · ' + (share || value || unavailable));
+      byId('prompt').value = [
+        byId('system-prompt').content.textContent, '', title, ...browserRows,
+        '- ' + exitSummary, ...(differenceNote ? ['- ' + differenceNote] : [])
+      ].join('\n');
+      byId('copy-status').textContent = '';
+    }
+    updatePrompt();
+
+    const lookup = byId('lookup');
+    lookup.textContent = t('Check browser exit', '检查浏览器出口');
+    lookup.addEventListener('click', async () => {
+      lookup.disabled = true;
+      byId('exit').textContent = t('Checking…', '查询中…');
+      byId('differences').textContent = '';
+      differenceNote = '';
+      const controller = new AbortController();
+      const timeout = setTimeout(() => controller.abort(), 8000);
+      try {
+        const response = await fetch('https://ipinfo.io/json', {
+          credentials: 'omit', cache: 'no-store', redirect: 'error', signal: controller.signal,
+        });
+        if (!response.ok) throw new Error('lookup failed');
+        const data = await response.json();
+        if (typeof data.ip !== 'string' || !data.ip.trim()) throw new Error('IP unavailable');
+        const location = [data.city, data.region, data.country, data.timezone]
+          .filter((value) => typeof value === 'string' && value.trim())
+          .join(' · ');
+        exitSummary = t('Estimated browser exit location and time zone', '浏览器出口估计位置与时区') +
+          ' · ' + (location || unavailable);
+        byId('exit').textContent = data.ip + ' · ' + exitSummary;
+        const differences = [];
+        if (/^[A-Z]{2}$/.test(localeRegion || '') && typeof data.country === 'string' &&
+            localeRegion !== data.country.toUpperCase()) {
+          differences.push(t('Browser locale region and exit country differ.', '浏览器区域和出口国家或地区不同。'));
+        }
+        if (formatting.timeZone && typeof data.timezone === 'string') {
+          try {
+            const exitZone = new Intl.DateTimeFormat('en', {timeZone: data.timezone})
+              .resolvedOptions().timeZone;
+            if (formatting.timeZone !== exitZone) {
+              differences.push(t('Browser and exit time zone IDs differ.', '浏览器时区标识与出口时区标识不同。'));
+            }
+          } catch {
+            // IP geolocation can return a zone unknown to this browser.
+          }
+        }
+        if (differences.length) {
+          differenceNote = differences.join(zh ? '' : ' ');
+          byId('differences').textContent = differenceNote + t(
+            ' VPN use and travel can cause differences.',
+            'VPN 或旅行都可能造成这种差异。'
+          );
+        }
+      } catch {
+        exitSummary = t('Browser exit lookup failed', '浏览器出口查询失败');
+        byId('exit').textContent = exitSummary;
+      } finally {
+        clearTimeout(timeout);
+        lookup.disabled = false;
+        updatePrompt();
+      }
+    });
+
+    byId('copy').addEventListener('click', async () => {
+      try {
+        await navigator.clipboard.writeText(byId('prompt').value);
+        byId('copy-status').textContent = t('Prompt copied.', '已复制提示词。');
+      } catch {
+        byId('prompt').select();
+        byId('copy-status').textContent = t(
+          'The prompt is selected. Use your browser’s copy shortcut.',
+          '已选中提示词，可用浏览器快捷键复制。'
+        );
+      }
+    });
+  </script>
+</body>
+</html>
