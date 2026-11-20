@@ -1,5 +1,9 @@
 # Unreleased
 
+- Add a read-only privacy check to System Settings with system locale, time
+  zone, DNS configuration, on-demand exit lookup, a local desktop browser
+  check, and copyable AI follow-up prompts.
+
 - Ask users to sign in again only after the Accounts session endpoint confirms
   rejection. Temporary workspace sync failures keep valid cached access.
 

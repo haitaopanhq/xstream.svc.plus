@@ -25,6 +25,7 @@ import '../screens/help_screen.dart';
 import '../screens/logs_screen.dart';
 import '../widgets/permission_guide_dialog.dart';
 import '../widgets/diagnostics/live_metrics_panel.dart';
+import '../widgets/diagnostics/browser_privacy_section.dart';
 import '../widgets/repair/repair_section.dart';
 import '../widgets/settings_row.dart';
 import '../widgets/settings_tab_bar.dart';
@@ -860,6 +861,7 @@ class _SettingsScreenState extends State<SettingsScreen> {
             onHowToFix: () => GlobalState.settingsTabRequest.value =
                 const SettingsTabRequest(id: SettingsTabId.system),
           ),
+          const BrowserPrivacySection(),
           const RepairSection(),
         ],
       ),
